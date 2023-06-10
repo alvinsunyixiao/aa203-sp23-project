@@ -28,9 +28,11 @@ if __name__ == "__main__":
 
     for i in range(10000):
         rng, key = jax.random.split(rng)
-        batch = dynamics.sample(key, args.batch_size)
-        metadict = cbf.train_step(batch, i)
-        print(f"Total Loss: {metadict['loss']:.4f} Safe Loss: {metadict['loss_safe']:.4f} Unsafe Loss: {metadict['loss_unsafe']:.4f} QP Loss: {metadict['loss_qp']:.4f} Num Success: {metadict['num_success']}")
+        states = dynamics.sample(key, args.batch_size)
+        rng, key = jax.random.split(rng)
+        controls = jax.random.uniform(key, (args.batch_size, dynamics.control_dim), minval=-dynamics.control_lim, maxval=dynamics.control_lim)
+        metadict = cbf.train_step(states, controls, i)
+        print(f"Step: {i} Total Loss: {metadict['loss']:.4f} Safe Loss: {metadict['loss_safe']:.4f} Unsafe Loss: {metadict['loss_unsafe']:.4f} QP Loss: {metadict['loss_qp']:.4f} Num Sucess: {metadict['num_success']}")
 
         if i % 100 == 0:
             cbf.save(args.output, step=i)

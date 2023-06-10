@@ -90,7 +90,7 @@ class NeuralCBF:
         dynamics: CtrlAffineSys,
         cbf_lambda: float = 1.,
         dt: float = 1e-2,
-        mlp_configs: T.Tuple[int, ...] = (128, 128, 128),
+        mlp_configs: T.Tuple[int, ...] = (256, 256, 256, 256),
     ) -> None:
         self.dynamics = dynamics
         self.cbf_lambda = cbf_lambda
@@ -124,15 +124,15 @@ class NeuralCBF:
                                         step=step,
                                         orbax_checkpointer=self.checkpointer)
 
-    def h(self, batch):
-        return self.state.apply_fn({"params": self.state.params}, batch)
+    def h(self, states):
+        return self.state.apply_fn({"params": self.state.params}, states)
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def policy(self, state, u_ref=None, relaxation_penalty=1e2, u_init=None):
+    def policy(self, state, u_ref=None, relaxation_penalty=1e4, u_init=None):
         sol, (h, hdot) = self.solve_CBF_QP(self.h, state, u_ref=u_ref, relaxation_penalty=relaxation_penalty, u_init=u_init, maxiter=10000)
         return sol.params.primal[:-1], (h, hdot, sol)
 
-    def solve_CBF_QP(self, h_func, state, relaxation_penalty=1e2, u_ref=None, u_init=None, maxiter=1000):
+    def solve_CBF_QP(self, h_func, state, relaxation_penalty=1e4, u_ref=None, u_init=None, maxiter=1000):
         h, h_D_x_s = jax.value_and_grad(h_func)(state)
 
         Lf_h = h_D_x_s @ self.dynamics.f(state)
@@ -179,7 +179,8 @@ class NeuralCBF:
 
     @functools.partial(jax.jit, static_argnums=(0,))
     def _cbf_train_step(self,
-                        batch: jax.Array,
+                        states: jax.Array,
+                        controls: jax.Array,
                         state: TrainState,
                         step: int) -> TrainState:
         def loss_fn(params):
@@ -191,12 +192,13 @@ class NeuralCBF:
 
                 return h, sol.params.primal[-1], success
 
-            h_b, r_b, success_b = jax.vmap(solve_single)(batch)
-            is_safe = self.dynamics.is_safe(batch)
-            is_unsafe = self.dynamics.is_unsafe(batch)
+            h_b, r_b, success_b = jax.vmap(solve_single)(states)
+            is_safe = self.dynamics.is_safe(states)
+            is_unsafe = self.dynamics.is_unsafe(states)
 
-            loss_safe_b = jnp.where(is_safe, jnp.maximum(h_b + 1e-2, 0.), 0.)
-            loss_unsafe_b = jnp.where(is_unsafe, jnp.maximum(-h_b + 1e-2, 0.), 0.)
+            eps = 1e-2
+            loss_safe_b = jnp.where(is_safe, jnp.maximum(h_b + eps, 0.), 0.)
+            loss_unsafe_b = jnp.where(is_unsafe, jnp.maximum(-h_b + eps, 0.), 0.)
 
             loss_safe = jnp.sum(loss_safe_b) / jnp.sum(is_safe)
             loss_unsafe = jnp.sum(loss_unsafe_b) / jnp.sum(is_unsafe)
@@ -218,7 +220,7 @@ class NeuralCBF:
 
         return state.apply_gradients(grads=grads), metadict, grads
 
-    def train_step(self, batch: jax.Array, step: int) -> T.Dict[str, T.Any]:
-        self.state, metadict, grads = self._cbf_train_step(batch, self.state, step)
+    def train_step(self, states: jax.Array, controls: jax.Array, step: int) -> T.Dict[str, T.Any]:
+        self.state, metadict, grads = self._cbf_train_step(states, controls, self.state, step)
         return metadict
 
