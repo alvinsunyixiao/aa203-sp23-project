@@ -3,7 +3,7 @@ import jax
 
 from jax.config import config
 
-from dynamics import DoubleIntegrator
+from dynamics import DoubleIntegrator, ExtendedUnicycle
 from model import NeuralCBF
 
 def parse_args():
@@ -21,18 +21,17 @@ if __name__ == "__main__":
 
     args = parse_args()
 
-    dynamics = DoubleIntegrator()
+    dynamics = ExtendedUnicycle()
     cbf = NeuralCBF(dynamics, cbf_lambda=.2)
 
     rng = jax.random.PRNGKey(42)
 
     for i in range(10000):
-        rng, key = jax.random.split(rng)
-        states = dynamics.sample(key, args.batch_size)
-        rng, key = jax.random.split(rng)
-        controls = jax.random.uniform(key, (args.batch_size, dynamics.control_dim), minval=-dynamics.control_lim, maxval=dynamics.control_lim)
+        rng, key1, key2 = jax.random.split(rng, 3)
+        states = dynamics.sample(key1, args.batch_size)
+        controls = jax.random.uniform(key2, (args.batch_size, dynamics.control_dim), minval=-dynamics.control_lim, maxval=dynamics.control_lim)
         metadict = cbf.train_step(states, controls, i)
-        print(f"Step: {i} Total Loss: {metadict['loss']:.4f} Safe Loss: {metadict['loss_safe']:.4f} Unsafe Loss: {metadict['loss_unsafe']:.4f} QP Loss: {metadict['loss_qp']:.4f} Num Sucess: {metadict['num_success']}")
+        print(f"Step: {i} Total Loss: {metadict['loss']:.4e} Safe Loss: {metadict['loss_safe']:.4e} Unsafe Loss: {metadict['loss_unsafe']:.4e} QP Loss: {metadict['loss_qp']:.4e} Num Sucess: {metadict['num_success']}")
 
         if i % 100 == 0:
             cbf.save(args.output, step=i)

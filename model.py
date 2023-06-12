@@ -128,41 +128,85 @@ class NeuralCBF:
         return self.state.apply_fn({"params": self.state.params}, states)
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def policy(self, state, u_ref=None, relaxation_penalty=1e4, u_init=None):
+    def policy_multi(self, states, u_ref, relaxation_penalty=1e2, maxiter=10000):
+        def jacobian_single(s):
+            h, h_D_x_s = jax.value_and_grad(self.h)(s)
+            Lf_h = h_D_x_s @ self.dynamics.f(s)
+            Lg_h_c = h_D_x_s @ self.dynamics.g(s)
+
+            return h, Lf_h, Lg_h_c
+
+        h_k, Lf_h_k, Lg_h_kc = jax.vmap(jacobian_single)(states)
+
+        def matvec_Q(_, x):
+            return 2. * x.at[-1].set(0.)
+
+        c = jnp.concatenate([-2. * u_ref, jnp.array([relaxation_penalty])])
+
+        def matvec_G(Lg_h_kc, x):
+            y_k = Lg_h_kc @ x[:-1] - x[-1]
+            y_r = -x[-1]
+            y_low_c = -x[:-1]
+            y_high_c = x[:-1]
+
+            return jnp.concatenate([y_k, y_r[jnp.newaxis]])
+            #return jnp.concatenate([y_k, y_low_c, y_high_c])
+
+        m_k = -h_k * self.cbf_lambda - Lf_h_k
+        m_r = jnp.array(0.)
+        m_low_c = -self.dynamics.control_lim
+        m_high_c = self.dynamics.control_lim
+        m = jnp.concatenate([m_k, m_r[jnp.newaxis]])
+        #m = jnp.concatenate([m_k, -m_low_c, m_high_c])
+
+        qp = OSQP(matvec_Q=matvec_Q, matvec_G=matvec_G, maxiter=maxiter)
+        init_params = qp.init_params(jnp.concatenate([u_ref, jnp.array([0.])]),
+                                     (None, c), None, (Lg_h_kc, m))
+        sol = qp.run(init_params, params_obj=(None, c), params_ineq=(Lg_h_kc, m))
+
+        u = sol.params.primal[:-1]
+        hdot_k = Lf_h_k + Lg_h_kc @ u
+
+        return u, (h_k, hdot_k, sol)
+
+    @functools.partial(jax.jit, static_argnums=(0,))
+    def policy(self, state, u_ref=None, relaxation_penalty=1e2, u_init=None):
         sol, (h, hdot) = self.solve_CBF_QP(self.h, state, u_ref=u_ref, relaxation_penalty=relaxation_penalty, u_init=u_init, maxiter=10000)
         return sol.params.primal[:-1], (h, hdot, sol)
 
-    def solve_CBF_QP(self, h_func, state, relaxation_penalty=1e4, u_ref=None, u_init=None, maxiter=1000):
+    def solve_CBF_QP(self, h_func, state, relaxation_penalty=1e2, u_ref=None, u_init=None, maxiter=1000):
         h, h_D_x_s = jax.value_and_grad(h_func)(state)
 
         Lf_h = h_D_x_s @ self.dynamics.f(state)
         Lg_h_c = h_D_x_s @ self.dynamics.g(state)
 
-        ur_dim = self.dynamics.control_dim + 1
-
         # objective
         def matvec_Q(_, x):
-            Q_vec = jnp.ones_like(x).at[-1].set(relaxation_penalty)
+            Q_vec = jnp.ones_like(x).at[-1].set(0.)
             return 2. * Q_vec * x
 
         if u_ref is None:
             u_ref = jnp.zeros(self.dynamics.control_dim)
-        c = jnp.concatenate([-2. * u_ref, jnp.array([0.])])
+        c = jnp.concatenate([-2. * u_ref, jnp.array([relaxation_penalty])])
 
         # inequality
         def matvec_G(Lg_h, x):
             # CBF QP
             y1 = Lg_h.T @ x[:-1] - x[-1]
+            y2 = -x[-1]
             # control constraints
             y_low = -x[:-1]
             y_high = x[:-1]
 
-            return jnp.concatenate([y1[jnp.newaxis], y_low, y_high])
+            return jnp.stack([y1, y2])
+            #return jnp.concatenate([y1[jnp.newaxis], y_low, y_high])
 
         h1 = -self.cbf_lambda * h - Lf_h
+        h2 = 0.
         ulim_low = -self.dynamics.control_lim
         ulim_high = self.dynamics.control_lim
-        h_qp = jnp.concatenate([h1[jnp.newaxis], -ulim_low, ulim_high])
+        #h_qp = jnp.concatenate([h1[jnp.newaxis], -ulim_low, ulim_high])
+        h_qp = jnp.stack([h1, h2])
 
         # solve OSQP
         if u_init is None:
@@ -204,7 +248,7 @@ class NeuralCBF:
             loss_unsafe = jnp.sum(loss_unsafe_b) / jnp.sum(is_unsafe)
             loss_qp = jnp.mean(r_b)
 
-            loss = loss_safe + loss_unsafe + 1e1 * loss_qp
+            loss = loss_safe + loss_unsafe + loss_qp
 
             return loss, {
                 "loss": loss,
